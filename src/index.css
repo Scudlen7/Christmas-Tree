@@ -54,6 +54,132 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+.tree-stats {
+  bottom: 30px;
+  left: 40px;
+}
+
+.tree-actions {
+  bottom: 30px;
+  right: 40px;
+}
+
+.photo-gallery-trigger {
+  display: block;
+  margin: 10px 0 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #aaa;
+  font-size: 10px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.photo-gallery-trigger:hover {
+  color: #ffd700;
+  text-decoration: underline;
+}
+
+.hand-hint {
+  color: #d9c98c;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.hand-reticle {
+  position: absolute;
+  z-index: 11;
+  width: 20px;
+  height: 20px;
+  translate: -50% -50%;
+  border: 2px solid #ffe78f;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #13110c, 0 0 12px #ffd75f;
+  pointer-events: none;
+}
+
+.hand-reticle.pinched {
+  background: #ffd75f;
+}
+
+.photo-viewer {
+  position: fixed;
+  inset: 0;
+  box-sizing: border-box;
+  width: min(46rem, calc(100% - 2rem));
+  max-height: calc(100dvh - 2rem);
+  margin: auto;
+  padding: 0.75rem;
+  overflow: auto;
+  border: 1px solid #a17c33;
+  border-radius: 12px;
+  background: #18150f;
+  color: #fae5a7;
+}
+
+.photo-viewer::backdrop {
+  background: rgb(0 0 0 / 78%);
+}
+
+.photo-viewer img {
+  display: block;
+  width: 100%;
+  height: min(64dvh, 38rem);
+  object-fit: contain;
+  border-radius: 6px;
+  background: #090806;
+}
+
+.photo-viewer button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid #8f7444;
+  background: #211a10;
+  color: #fae5a7;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.photo-viewer button:hover {
+  border-color: #ffd700;
+}
+
+.photo-close {
+  position: absolute;
+  top: 1.15rem;
+  right: 1.15rem;
+}
+
+.photo-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-viewer p {
+  margin: 0.5rem 0 0;
+  text-align: center;
+  color: #d0c2a1;
+  font-size: 0.8rem;
+}
+
+@media (max-width: 560px) {
+  .tree-stats {
+    bottom: 80px;
+    left: 16px;
+  }
+
+  .tree-actions {
+    bottom: 16px;
+    right: 16px;
+  }
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;

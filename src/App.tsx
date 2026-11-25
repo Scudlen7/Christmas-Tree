@@ -1,5 +1,7 @@
-import { useState, useMemo, useRef, useEffect, Suspense } from 'react';
-import { Canvas, useFrame, extend } from '@react-three/fiber';
+import { useState, useMemo, useRef, useEffect, useCallback, useImperativeHandle, Suspense } from 'react';
+import type { ElementRef, Ref } from 'react';
+import { Canvas, useFrame, useThree, extend } from '@react-three/fiber';
+import type { Object3DNode } from '@react-three/fiber';
 import {
   OrbitControls,
   Environment,
@@ -15,14 +17,21 @@ import * as THREE from 'three';
 import { MathUtils } from 'three';
 import * as random from 'maath/random';
 import { GestureRecognizer, FilesetResolver, DrawingUtils } from "@mediapipe/tasks-vision";
+import type { NormalizedLandmark } from '@mediapipe/tasks-vision';
+import { createHandInteraction, readHand } from './handInteraction';
+import PhotoViewer from './PhotoViewer';
+import visionLoader from '../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js?url';
+import visionWasm from '../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm?url';
+import visionLoaderNoSimd from '../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal.js?url';
+import visionWasmNoSimd from '../node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_nosimd_internal.wasm?url';
 
-// --- 动态生成照片列表 (top.jpg + 1.jpg 到 31.jpg) ---
-const TOTAL_NUMBERED_PHOTOS = 31;
-// 修改：将 top.jpg 加入到数组开头
 const bodyPhotoPaths = [
-  '/photos/top.jpg',
-  ...Array.from({ length: TOTAL_NUMBERED_PHOTOS }, (_, i) => `/photos/${i + 1}.jpg`)
-];
+  'gifts.png',
+  'wreath.png',
+  'gingerbread.png',
+  'snow-globe.png',
+  'ornament.png',
+].map(name => `${import.meta.env.BASE_URL}photos/${name}`);
 
 // --- 视觉配置 ---
 const CONFIG = {
@@ -49,7 +58,6 @@ const CONFIG = {
   },
   tree: { height: 22, radius: 9 }, // 树体尺寸
   photos: {
-    // top 属性不再需要，因为已经移入 body
     body: bodyPhotoPaths
   }
 };
@@ -59,7 +67,7 @@ const FoliageMaterial = shaderMaterial(
   { uTime: 0, uColor: new THREE.Color(CONFIG.colors.emerald), uProgress: 0 },
   `uniform float uTime; uniform float uProgress; attribute vec3 aTargetPos; attribute float aRandom;
   varying vec2 vUv; varying float vMix;
-  float cubicInOut(float t) { return t < 0.5 ? 4.0 * t * t * t : 0.5 * pow(2.0 * t - 2.0, 3.0) + 1.0; }
+  float cubicInOut(float t) { return t < 0.5 ? 4.0 * t * t * t : 1.0 - 4.0 * pow(1.0 - t, 3.0); }
   void main() {
     vUv = uv;
     vec3 noise = vec3(sin(uTime * 1.5 + position.x), cos(uTime + position.y), sin(uTime * 1.5 + position.z)) * 0.15;
@@ -79,6 +87,14 @@ const FoliageMaterial = shaderMaterial(
 );
 extend({ FoliageMaterial });
 
+type FoliageShader = InstanceType<typeof FoliageMaterial> & { uTime: number; uProgress: number };
+
+declare module '@react-three/fiber' {
+  interface ThreeElements {
+    foliageMaterial: Object3DNode<FoliageShader, typeof FoliageMaterial>;
+  }
+}
+
 // --- Helper: Tree Shape ---
 const getTreePosition = () => {
   const h = CONFIG.tree.height; const rBase = CONFIG.tree.radius;
@@ -90,7 +106,7 @@ const getTreePosition = () => {
 
 // --- Component: Foliage ---
 const Foliage = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
-  const materialRef = useRef<any>(null);
+  const materialRef = useRef<FoliageShader>(null);
   const { positions, targetPositions, randoms } = useMemo(() => {
     const count = CONFIG.counts.foliage;
     const positions = new Float32Array(count * 3); const targetPositions = new Float32Array(count * 3); const randoms = new Float32Array(count);
@@ -117,17 +133,38 @@ const Foliage = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
         <bufferAttribute attach="attributes-aTargetPos" args={[targetPositions, 3]} />
         <bufferAttribute attach="attributes-aRandom" args={[randoms, 1]} />
       </bufferGeometry>
-      {/* @ts-ignore */}
       <foliageMaterial ref={materialRef} transparent depthWrite={false} blending={THREE.AdditiveBlending} />
     </points>
   );
 };
 
 // --- Component: Photo Ornaments (Double-Sided Polaroid) ---
-const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
+type PhotoPicker = (point: { x: number; y: number }) => number | undefined;
+
+const PhotoOrnaments = ({ state, aiming, pickerRef, onPhoto }: {
+  state: 'CHAOS' | 'FORMED';
+  aiming: boolean;
+  pickerRef: Ref<PhotoPicker>;
+  onPhoto: (index: number) => void;
+}) => {
   const textures = useTexture(CONFIG.photos.body);
   const count = CONFIG.counts.ornaments;
   const groupRef = useRef<THREE.Group>(null);
+  const camera = useThree(state => state.camera);
+
+  useImperativeHandle(pickerRef, () => {
+    const raycaster = new THREE.Raycaster();
+    return point => {
+      const group = groupRef.current;
+      if (!group) return;
+      camera.updateWorldMatrix(true, false);
+      group.updateWorldMatrix(true, true);
+      raycaster.setFromCamera(new THREE.Vector2(point.x * 2 - 1, 1 - point.y * 2), camera);
+      const hit = raycaster.intersectObject(group, true)[0];
+      const index = hit?.object.parent?.parent?.userData.photoIndex;
+      return typeof index === 'number' ? index : undefined;
+    };
+  }, [camera]);
 
   const borderGeometry = useMemo(() => new THREE.PlaneGeometry(1.2, 1.5), []);
   const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
@@ -167,7 +204,7 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   }, [textures, count]);
 
   useFrame((stateObj, delta) => {
-    if (!groupRef.current) return;
+    if (!groupRef.current || aiming) return;
     const isFormed = state === 'FORMED';
     const time = stateObj.clock.elapsedTime;
 
@@ -198,7 +235,17 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   return (
     <group ref={groupRef}>
       {data.map((obj, i) => (
-        <group key={i} scale={[obj.scale, obj.scale, obj.scale]} rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}>
+        <group
+          key={i}
+          scale={[obj.scale, obj.scale, obj.scale]}
+          rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}
+          userData={{ photoIndex: obj.textureIndex }}
+          onClick={event => {
+            if (event.delta > 4) return;
+            event.stopPropagation();
+            onPhoto(obj.textureIndex);
+          }}
+        >
           {/* 正面 */}
           <group position={[0, 0, 0.015]}>
             <mesh geometry={photoGeometry}>
@@ -262,7 +309,7 @@ const ChristmasElements = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
       const rotationSpeed = { x: (Math.random()-0.5)*2.0, y: (Math.random()-0.5)*2.0, z: (Math.random()-0.5)*2.0 };
       return { type, chaosPos, targetPos, color, scale, currentPos: chaosPos.clone(), chaosRotation: new THREE.Euler(Math.random()*Math.PI, Math.random()*Math.PI, Math.random()*Math.PI), rotationSpeed };
     });
-  }, [boxGeometry, sphereGeometry, caneGeometry]);
+  }, [count]);
 
   useFrame((_, delta) => {
     if (!groupRef.current) return;
@@ -304,7 +351,7 @@ const FairyLights = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
       const speed = 2 + Math.random() * 3;
       return { chaosPos, targetPos, color, speed, currentPos: chaosPos.clone(), timeOffset: Math.random() * 100 };
     });
-  }, []);
+  }, [count]);
 
   useFrame((stateObj, delta) => {
     if (!groupRef.current) return;
@@ -340,7 +387,10 @@ const TopStar = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
     for (let i = 0; i < points * 2; i++) {
       const radius = i % 2 === 0 ? outerRadius : innerRadius;
       const angle = (i / (points * 2)) * Math.PI * 2 - Math.PI / 2;
-      i === 0 ? shape.moveTo(radius*Math.cos(angle), radius*Math.sin(angle)) : shape.lineTo(radius*Math.cos(angle), radius*Math.sin(angle));
+      const x = radius * Math.cos(angle);
+      const y = radius * Math.sin(angle);
+      if (i === 0) shape.moveTo(x, y);
+      else shape.lineTo(x, y);
     }
     shape.closePath();
     return shape;
@@ -380,8 +430,14 @@ const TopStar = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 };
 
 // --- Main Scene Experience ---
-const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number }) => {
-  const controlsRef = useRef<any>(null);
+const Experience = ({ sceneState, rotationSpeed, aiming, pickerRef, onPhoto }: {
+  sceneState: 'CHAOS' | 'FORMED';
+  rotationSpeed: number;
+  aiming: boolean;
+  pickerRef: Ref<PhotoPicker>;
+  onPhoto: (index: number) => void;
+}) => {
+  const controlsRef = useRef<ElementRef<typeof OrbitControls>>(null);
   useFrame(() => {
     if (controlsRef.current) {
       controlsRef.current.setAzimuthalAngle(controlsRef.current.getAzimuthalAngle() + rotationSpeed);
@@ -392,11 +448,11 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
   return (
     <>
       <PerspectiveCamera makeDefault position={[0, 8, 60]} fov={45} />
-      <OrbitControls ref={controlsRef} enablePan={false} enableZoom={true} minDistance={30} maxDistance={120} autoRotate={rotationSpeed === 0 && sceneState === 'FORMED'} autoRotateSpeed={0.3} maxPolarAngle={Math.PI / 1.7} />
+      <OrbitControls ref={controlsRef} enablePan={false} enableZoom={true} minDistance={30} maxDistance={120} autoRotate={!aiming && rotationSpeed === 0 && sceneState === 'FORMED'} autoRotateSpeed={0.3} maxPolarAngle={Math.PI / 1.7} />
 
       <color attach="background" args={['#000300']} />
       <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
-      <Environment preset="night" background={false} />
+      <Environment files={`${import.meta.env.BASE_URL}dikhololo_night_1k.hdr`} background={false} />
 
       <ambientLight intensity={0.4} color="#003311" />
       <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} />
@@ -406,7 +462,7 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
       <group position={[0, -6, 0]}>
         <Foliage state={sceneState} />
         <Suspense fallback={null}>
-           <PhotoOrnaments state={sceneState} />
+           <PhotoOrnaments state={sceneState} aiming={aiming} pickerRef={pickerRef} onPhoto={onPhoto} />
            <ChristmasElements state={sceneState} />
            <FairyLights state={sceneState} />
            <TopStar state={sceneState} />
@@ -423,82 +479,113 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
 };
 
 // --- Gesture Controller ---
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
+const GestureController = ({ onHand, onStatus, debugMode }: {
+  onHand: (landmarks: NormalizedLandmark[] | undefined, pose: string | undefined, aspectRatio: number, now: number) => boolean;
+  onStatus: (status: string) => void;
+  debugMode: boolean;
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const debugRef = useRef(debugMode);
 
   useEffect(() => {
-    let gestureRecognizer: GestureRecognizer;
-    let requestRef: number;
+    debugRef.current = debugMode;
+  }, [debugMode]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas) return;
+
+    const ctx = canvas.getContext("2d");
+    const drawingUtils = ctx && new DrawingUtils(ctx);
+    let recognizer: GestureRecognizer | undefined;
+    let stream: MediaStream | undefined;
+    let frame = 0;
+    let lastVideoTime = -1;
+    let cancelled = false;
+
+    const release = () => {
+      cancelAnimationFrame(frame);
+      stream?.getTracks().forEach(track => track.stop());
+      if (video.srcObject === stream) video.srcObject = null;
+      stream = undefined;
+      recognizer?.close();
+      recognizer = undefined;
+    };
+
+    const predictWebcam = () => {
+      if (!recognizer) return;
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        const now = performance.now();
+        const results = recognizer.recognizeForVideo(video, now);
+        const gesture = results.gestures[0]?.[0];
+        const name = gesture && gesture.score > 0.4 ? gesture.categoryName : undefined;
+        const pinched = onHand(results.landmarks[0], name, video.videoWidth / video.videoHeight, now);
+
+        if (debugRef.current && ctx && drawingUtils) {
+          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+          }
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          for (const landmarks of results.landmarks) {
+            drawingUtils.drawConnectors(landmarks, GestureRecognizer.HAND_CONNECTIONS, { color: "#FFD700", lineWidth: 2 });
+            drawingUtils.drawLandmarks(landmarks, { color: "#FF0000", lineWidth: 1 });
+          }
+          onStatus(pinched ? "DETECTED: Pinch" : name ? `DETECTED: ${name}` : "AI READY: NO HAND");
+        } else {
+          onStatus("AI READY: SHOW HAND");
+        }
+      }
+      frame = requestAnimationFrame(predictWebcam);
+    };
 
     const setup = async () => {
       onStatus("DOWNLOADING AI...");
       try {
-        const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
-        gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+        const simd = await FilesetResolver.isSimdSupported();
+        if (cancelled) return;
+        recognizer = await GestureRecognizer.createFromOptions({
+          wasmLoaderPath: simd ? visionLoader : visionLoaderNoSimd,
+          wasmBinaryPath: simd ? visionWasm : visionWasmNoSimd,
+        }, {
           baseOptions: {
-            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
-            delegate: "GPU"
+            modelAssetPath: `${import.meta.env.BASE_URL}gesture_recognizer.task`,
+            delegate: "GPU",
           },
           runningMode: "VIDEO",
-          numHands: 1
+          numHands: 1,
         });
+        if (cancelled) return release();
         onStatus("REQUESTING CAMERA...");
-        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-            videoRef.current.play();
-            onStatus("AI READY: SHOW HAND");
-            predictWebcam();
-          }
-        } else {
-            onStatus("ERROR: CAMERA PERMISSION DENIED");
-        }
-      } catch (err: any) {
-        onStatus(`ERROR: ${err.message || 'MODEL FAILED'}`);
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        if (cancelled) return release();
+        video.srcObject = stream;
+        await video.play();
+        if (cancelled) return;
+        onStatus("AI READY: SHOW HAND");
+        frame = requestAnimationFrame(predictWebcam);
+      } catch (err) {
+        release();
+        if (!cancelled) onStatus(`ERROR: ${err instanceof Error ? err.message : 'MODEL FAILED'}`);
       }
     };
 
-    const predictWebcam = () => {
-      if (gestureRecognizer && videoRef.current && canvasRef.current) {
-        if (videoRef.current.videoWidth > 0) {
-            const results = gestureRecognizer.recognizeForVideo(videoRef.current, Date.now());
-            const ctx = canvasRef.current.getContext("2d");
-            if (ctx && debugMode) {
-                ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-                canvasRef.current.width = videoRef.current.videoWidth; canvasRef.current.height = videoRef.current.videoHeight;
-                if (results.landmarks) for (const landmarks of results.landmarks) {
-                        const drawingUtils = new DrawingUtils(ctx);
-                        drawingUtils.drawConnectors(landmarks, GestureRecognizer.HAND_CONNECTIONS, { color: "#FFD700", lineWidth: 2 });
-                        drawingUtils.drawLandmarks(landmarks, { color: "#FF0000", lineWidth: 1 });
-                }
-            } else if (ctx && !debugMode) ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-            if (results.gestures.length > 0) {
-              const name = results.gestures[0][0].categoryName; const score = results.gestures[0][0].score;
-              if (score > 0.4) {
-                 if (name === "Open_Palm") onGesture("CHAOS"); if (name === "Closed_Fist") onGesture("FORMED");
-                 if (debugMode) onStatus(`DETECTED: ${name}`);
-              }
-              if (results.landmarks.length > 0) {
-                const speed = (0.5 - results.landmarks[0][0].x) * 0.15;
-                onMove(Math.abs(speed) > 0.01 ? speed : 0);
-              }
-            } else { onMove(0); if (debugMode) onStatus("AI READY: NO HAND"); }
-        }
-        requestRef = requestAnimationFrame(predictWebcam);
-      }
+    if (typeof navigator.mediaDevices?.getUserMedia === 'function') void setup();
+    else onStatus("ERROR: CAMERA UNAVAILABLE");
+    return () => {
+      cancelled = true;
+      release();
+      drawingUtils?.close();
     };
-    setup();
-    return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onMove, onStatus, debugMode]);
+  }, [onHand, onStatus]);
 
   return (
     <>
-      <video ref={videoRef} style={{ opacity: debugMode ? 0.6 : 0, position: 'fixed', top: 0, right: 0, width: debugMode ? '320px' : '1px', zIndex: debugMode ? 100 : -1, pointerEvents: 'none', transform: 'scaleX(-1)' }} playsInline muted autoPlay />
-      <canvas ref={canvasRef} style={{ position: 'fixed', top: 0, right: 0, width: debugMode ? '320px' : '1px', height: debugMode ? 'auto' : '1px', zIndex: debugMode ? 101 : -1, pointerEvents: 'none', transform: 'scaleX(-1)' }} />
+      <video ref={videoRef} style={{ opacity: debugMode ? 0.6 : 0, position: 'fixed', top: 0, right: 0, width: debugMode ? '320px' : '1px', maxWidth: '100vw', zIndex: debugMode ? 100 : -1, pointerEvents: 'none', transform: 'scaleX(-1)' }} playsInline muted autoPlay />
+      <canvas ref={canvasRef} style={{ position: 'fixed', top: 0, right: 0, width: debugMode ? '320px' : '1px', maxWidth: '100vw', height: debugMode ? 'auto' : '1px', zIndex: debugMode ? 101 : -1, pointerEvents: 'none', transform: 'scaleX(-1)' }} />
     </>
   );
 };
@@ -509,20 +596,69 @@ export default function GrandTreeApp() {
   const [rotationSpeed, setRotationSpeed] = useState(0);
   const [aiStatus, setAiStatus] = useState("INITIALIZING...");
   const [debugMode, setDebugMode] = useState(false);
+  const [aiming, setAiming] = useState(false);
+  const [photoIndex, setPhotoIndex] = useState<number | null>(null);
+  const currentPhoto = useRef<number | null>(null);
+  const pickerRef = useRef<PhotoPicker>(null);
+  const reticleRef = useRef<HTMLDivElement>(null);
+  const handState = useRef(createHandInteraction());
+
+  const showPhoto = useCallback((index: number | null) => {
+    currentPhoto.current = index;
+    setPhotoIndex(index);
+    setRotationSpeed(0);
+  }, []);
+
+  const stepPhoto = useCallback((direction: -1 | 1) => {
+    const length = bodyPhotoPaths.length;
+    if (currentPhoto.current !== null) showPhoto((currentPhoto.current + direction + length) % length);
+  }, [showPhoto]);
+
+  const handleHand = useCallback((landmarks: NormalizedLandmark[] | undefined, pose: string | undefined, aspectRatio: number, now: number) => {
+    const viewing = currentPhoto.current !== null;
+    const { aim, command, rotation, pinched } = readHand(handState.current, landmarks, pose, aspectRatio, viewing, now);
+    const reticle = reticleRef.current;
+    if (reticle) {
+      reticle.hidden = viewing || !aim;
+      if (aim) {
+        reticle.style.left = `${aim.x * 100}%`;
+        reticle.style.top = `${aim.y * 100}%`;
+        reticle.classList.toggle('pinched', pinched);
+      }
+    }
+    setAiming(!!aim);
+    setRotationSpeed(rotation);
+
+    switch (command) {
+      case 'grab': {
+        const index = aim && pickerRef.current?.(aim);
+        if (index !== undefined) showPhoto(index);
+        break;
+      }
+      case 'close': showPhoto(null); break;
+      case 'previous': stepPhoto(-1); break;
+      case 'next': stepPhoto(1); break;
+      case 'scatter': setSceneState('CHAOS'); break;
+      case 'assemble': setSceneState('FORMED'); break;
+    }
+    return pinched;
+  }, [showPhoto, stepPhoto]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
         <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows>
-            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
+            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} aiming={aiming || photoIndex !== null} pickerRef={pickerRef} onPhoto={showPhoto} />
         </Canvas>
       </div>
-      <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} debugMode={debugMode} />
+      <GestureController onHand={handleHand} onStatus={setAiStatus} debugMode={debugMode} />
+      <div className="hand-reticle" ref={reticleRef} hidden aria-hidden="true" />
+      <PhotoViewer photos={bodyPhotoPaths} index={photoIndex} onClose={() => showPhoto(null)} onStep={stepPhoto} />
 
       {/* UI - Stats */}
-      <div style={{ position: 'absolute', bottom: '30px', left: '40px', color: '#888', zIndex: 10, fontFamily: 'sans-serif', userSelect: 'none' }}>
+      <div className="tree-stats" style={{ position: 'absolute', color: '#888', zIndex: 10, fontFamily: 'sans-serif', userSelect: 'none' }}>
         <div style={{ marginBottom: '15px' }}>
-          <p style={{ fontSize: '10px', letterSpacing: '2px', textTransform: 'uppercase', marginBottom: '4px' }}>Memories</p>
+          <button className="photo-gallery-trigger" onClick={() => showPhoto(0)}>Memories</button>
           <p style={{ fontSize: '24px', color: '#FFD700', fontWeight: 'bold', margin: 0 }}>
             {CONFIG.counts.ornaments.toLocaleString()} <span style={{ fontSize: '10px', color: '#555', fontWeight: 'normal' }}>POLAROIDS</span>
           </p>
@@ -536,8 +672,8 @@ export default function GrandTreeApp() {
       </div>
 
       {/* UI - Buttons */}
-      <div style={{ position: 'absolute', bottom: '30px', right: '40px', zIndex: 10, display: 'flex', gap: '10px' }}>
-        <button onClick={() => setDebugMode(!debugMode)} style={{ padding: '12px 15px', backgroundColor: debugMode ? '#FFD700' : 'rgba(0,0,0,0.5)', border: '1px solid #FFD700', color: debugMode ? '#000' : '#FFD700', fontFamily: 'sans-serif', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', backdropFilter: 'blur(4px)' }}>
+      <div className="tree-actions" style={{ position: 'absolute', zIndex: 10, display: 'flex', gap: '10px' }}>
+        <button aria-pressed={debugMode} onClick={() => setDebugMode(!debugMode)} style={{ padding: '12px 15px', backgroundColor: debugMode ? '#FFD700' : 'rgba(0,0,0,0.5)', border: '1px solid #FFD700', color: debugMode ? '#000' : '#FFD700', fontFamily: 'sans-serif', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', backdropFilter: 'blur(4px)' }}>
            {debugMode ? 'HIDE DEBUG' : '🛠 DEBUG'}
         </button>
         <button onClick={() => setSceneState(s => s === 'CHAOS' ? 'FORMED' : 'CHAOS')} style={{ padding: '12px 30px', backgroundColor: 'rgba(0,0,0,0.5)', border: '1px solid rgba(255, 215, 0, 0.5)', color: '#FFD700', fontFamily: 'serif', fontSize: '14px', fontWeight: 'bold', letterSpacing: '3px', textTransform: 'uppercase', cursor: 'pointer', backdropFilter: 'blur(4px)' }}>
@@ -548,6 +684,7 @@ export default function GrandTreeApp() {
       {/* UI - AI Status */}
       <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', color: aiStatus.includes('ERROR') ? '#FF0000' : 'rgba(255, 215, 0, 0.4)', fontSize: '10px', letterSpacing: '2px', zIndex: 10, background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: '4px' }}>
         {aiStatus}
+        {aiStatus === "AI READY: SHOW HAND" && <div className="hand-hint">Point at a photo, then pinch</div>}
       </div>
     </div>
   );
